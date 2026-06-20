@@ -1,0 +1,583 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mudrock.dev/spec/system-spec.schema.json",
+  "title": "Mudrock System Specification",
+  "version": "0.1.0",
+  "description": "Machine-readable architecture and integration matrix for the Mudrock zero-configuration runtime.",
+  "system": {
+    "name": "mudrock",
+    "design_metric": "absolute_zero_configuration",
+    "deployment_instruction_source": "code_only",
+    "target_consumers": ["human_developers", "autonomous_coding_agents"]
+  },
+  "configuration_invariants": [
+    {
+      "id": "namespace-primary-boundary",
+      "statement": "Namespace is derived from owner identity and app id, never from user-supplied display names.",
+      "enforced_by": ["api-gateway", "control-plane", "data-plane", "runtime-host"]
+    },
+    {
+      "id": "no-container-build",
+      "statement": "Deployments compile raw source in memory and do not create container images.",
+      "enforced_by": ["compilerd", "runtime-manager"]
+    },
+    {
+      "id": "no-user-storage-config",
+      "statement": "User code cannot configure physical databases, buckets, OAuth clients, or pub-sub backends.",
+      "enforced_by": ["runtime-host", "mudrock-sdk"]
+    },
+    {
+      "id": "committed-mutations-drive-sync",
+      "statement": "Reactive events are emitted only from committed primitive mutations.",
+      "enforced_by": ["data-plane", "sync-router"]
+    }
+  ],
+  "modules": [
+    {
+      "name": "api-gateway",
+      "kind": "edge_http_service",
+      "responsibilities": ["deployment_api", "route_resolution", "reserved_path_interception", "oauth_callback_entry", "sync_upgrade"],
+      "protocols": ["https", "http2", "websocket", "sse", "grpc_mtls"]
+    },
+    {
+      "name": "compilerd",
+      "kind": "memory_only_compiler",
+      "responsibilities": ["raw_source_ingest", "esm_bundle", "primitive_detection", "dependency_policy_enforcement"],
+      "implementation": {
+        "primary_binding": "esbuild",
+        "alternate_binding": "swc",
+        "write_to_disk": false,
+        "container_build": false,
+        "module_format": "esm"
+      }
+    },
+    {
+      "name": "runtime-manager",
+      "kind": "worker_orchestrator",
+      "responsibilities": ["isolate_pooling", "wasm_worker_pooling", "revision_activation", "lifecycle_limits", "bytecode_cache"]
+    },
+    {
+      "name": "runtime-host",
+      "kind": "capability_host",
+      "responsibilities": ["request_invocation", "host_bindings", "capability_validation", "resource_metering"]
+    },
+    {
+      "name": "data-plane",
+      "kind": "embedded_persistence_service",
+      "responsibilities": ["kv_records", "binary_blocks", "mutation_log", "transactional_writes"]
+    },
+    {
+      "name": "auth-broker",
+      "kind": "oauth_proxy",
+      "responsibilities": ["provider_redirect", "pkce_validation", "state_validation", "session_token_issuance", "provider_token_vault"]
+    },
+    {
+      "name": "sync-router",
+      "kind": "reactive_fanout_service",
+      "responsibilities": ["mutation_log_tail", "namespace_subscription_registry", "sse_delivery", "websocket_delivery", "resume_by_sequence"]
+    }
+  ],
+  "external_endpoints": [
+    {
+      "id": "create_app",
+      "method": "POST",
+      "path": "/v1/apps",
+      "auth": ["agent_dpop_token", "user_bearer_token"],
+      "request_body": {
+        "content_type": "application/json",
+        "schema_ref": "#/$defs/CreateAppRequest"
+      },
+      "response_body": {
+        "content_type": "application/json",
+        "schema_ref": "#/$defs/CreateAppResponse"
+      },
+      "data_boundaries": ["control_plane", "compiler_boundary", "runtime_boundary"]
+    },
+    {
+      "id": "create_deployment",
+      "method": "POST",
+      "path": "/v1/apps/{app_id}/deployments",
+      "auth": ["agent_dpop_token", "user_bearer_token"],
+      "request_body": {
+        "content_type": "application/json",
+        "schema_ref": "#/$defs/CreateDeploymentRequest"
+      },
+      "response_body": {
+        "content_type": "application/json",
+        "schema_ref": "#/$defs/Deployment"
+      },
+      "data_boundaries": ["control_plane", "compiler_boundary", "runtime_boundary"]
+    },
+    {
+      "id": "invoke_app",
+      "method": "ANY",
+      "path": "/a/{namespace}/{path...}",
+      "auth": ["optional_app_session_token", "optional_agent_token"],
+      "reserved_paths": ["/__mudrock/sync", "/__mudrock/auth/start", "/__mudrock/auth/callback", "/__mudrock/health", "/__mudrock/manifest"],
+      "data_boundaries": ["edge_boundary", "runtime_boundary", "data_plane_boundary"]
+    },
+    {
+      "id": "sync_sse",
+      "method": "GET",
+      "path": "/a/{namespace}/__mudrock/sync",
+      "protocol": "sse",
+      "auth": ["app_session_token", "agent_dpop_token"],
+      "query": {
+        "primitive": "string",
+        "after_sequence": "integer_optional"
+      },
+      "response_body": {
+        "content_type": "text/event-stream",
+        "schema_ref": "#/$defs/SyncEvent"
+      },
+      "data_boundaries": ["sync_boundary"]
+    },
+    {
+      "id": "sync_websocket",
+      "method": "GET",
+      "path": "/a/{namespace}/__mudrock/sync",
+      "protocol": "websocket",
+      "subprotocol": "mudrock.sync.v1",
+      "auth": ["app_session_token", "agent_dpop_token"],
+      "frames": {
+        "client": ["#/$defs/SyncSubscribeFrame"],
+        "server": ["#/$defs/SyncEventFrame"]
+      },
+      "data_boundaries": ["sync_boundary"]
+    },
+    {
+      "id": "oauth_start",
+      "method": "GET",
+      "path": "/a/{namespace}/__mudrock/auth/start",
+      "auth": ["none"],
+      "query": {
+        "provider": "github|google",
+        "redirect_path": "string_optional"
+      },
+      "intercepted_by": "api-gateway"
+    },
+    {
+      "id": "oauth_callback",
+      "method": "GET",
+      "path": "/auth/callback/{provider}",
+      "auth": ["provider_callback"],
+      "query": {
+        "code": "string",
+        "state": "string"
+      },
+      "intercepted_by": "auth-broker"
+    },
+    {
+      "id": "omd_discovery",
+      "method": "GET",
+      "path": "/.well-known/omd.json",
+      "auth": ["none"],
+      "response_body": {
+        "content_type": "application/json",
+        "schema_ref": "#/$defs/OmdDocument"
+      }
+    },
+    {
+      "id": "agent_register",
+      "method": "POST",
+      "path": "/v1/agents/register",
+      "auth": ["software_statement_or_admin_token"],
+      "request_body": {
+        "content_type": "application/json",
+        "schema_ref": "#/$defs/AgentRegistrationRequest"
+      },
+      "response_body": {
+        "content_type": "application/json",
+        "schema_ref": "#/$defs/AgentRegistrationResponse"
+      }
+    }
+  ],
+  "internal_protocols": [
+    {
+      "id": "compiler_grpc",
+      "transport": "grpc_mtls",
+      "service": "mudrock.compiler.v1.Compiler",
+      "methods": [
+        {
+          "name": "Compile",
+          "request_schema": "#/$defs/CompileRequest",
+          "response_schema": "#/$defs/CompileResult"
+        }
+      ]
+    },
+    {
+      "id": "runtime_grpc",
+      "transport": "grpc_mtls",
+      "service": "mudrock.runtime.v1.Runtime",
+      "methods": [
+        {
+          "name": "Invoke",
+          "request_schema": "#/$defs/InvocationEnvelope",
+          "response_schema": "#/$defs/InvocationResponse"
+        }
+      ]
+    },
+    {
+      "id": "data_plane_grpc",
+      "transport": "unix_socket_or_grpc_mtls",
+      "service": "mudrock.data.v1.Primitives",
+      "methods": ["Get", "Put", "Patch", "Delete", "List", "StoragePut", "StorageGet"]
+    }
+  ],
+  "runtime": {
+    "default": "v8-isolate",
+    "supported": [
+      {
+        "name": "v8-isolate",
+        "globals": ["Request", "Response", "URL", "Headers", "ReadableStream", "WritableStream", "TransformStream", "crypto.subtle", "Mudrock"],
+        "blocked_apis": ["fs", "process", "child_process", "net", "udp", "native_addons", "unscoped_fetch_to_private_networks"],
+        "lifecycle": {
+          "max_requests_per_isolate": 128,
+          "idle_ttl_ms": 60000,
+          "max_cpu_ms_per_request": 50,
+          "max_wall_ms_per_request": 30000,
+          "max_heap_bytes": 134217728
+        }
+      },
+      {
+        "name": "wasm-worker",
+        "abi": "component-model",
+        "wasi": "preview2",
+        "host_imports": ["mudrock_db", "mudrock_storage", "mudrock_auth", "mudrock_sync"],
+        "metering": ["fuel", "linear_memory_cap", "deadline"]
+      }
+    ]
+  },
+  "compiler": {
+    "input": "raw_source_string",
+    "output": "memory_resident_esm_bundle",
+    "disk_writes_allowed": false,
+    "container_build_allowed": false,
+    "resolver_policy": {
+      "allowed_builtin_imports": ["mudrock:runtime", "mudrock:db", "mudrock:storage", "mudrock:auth", "mudrock:sync"],
+      "npm_resolution": "control_plane_cached_sri_graph",
+      "deny": ["native_modules", "postinstall_scripts", "dynamic_filesystem_reads", "process_env_reads"]
+    },
+    "primitive_detection_patterns": [
+      "Mudrock.db(<literal>)",
+      "Mudrock.storage(<literal>)",
+      "Mudrock.sync(<literal>)",
+      "Mudrock.auth"
+    ]
+  },
+  "persistence": {
+    "profiles": [
+      {
+        "name": "sqlite-wal",
+        "default": true,
+        "tenant_segmentation": "one_sqlite_database_per_namespace",
+        "pragmas": {
+          "journal_mode": "WAL",
+          "synchronous": "NORMAL",
+          "busy_timeout": 250,
+          "foreign_keys": "ON",
+          "trusted_schema": "OFF"
+        },
+        "tables": ["kv_records", "binary_blocks", "mutation_log"]
+      },
+      {
+        "name": "rocksdb-keyv",
+        "default": false,
+        "tenant_segmentation": "namespace_key_prefix",
+        "key_patterns": [
+          "mr/{namespace}/kv/{primitive}/{escaped_key}",
+          "mr/{namespace}/blob/{primitive}/{object_key}/{block_index}",
+          "mr/{namespace}/log/{sequence}"
+        ],
+        "encoding": "messagepack"
+      }
+    ],
+    "binary_streaming": {
+      "block_size_bytes": 1048576,
+      "hash": "sha256",
+      "transactional_manifest": true,
+      "object_storage_required": false
+    }
+  },
+  "auth": {
+    "oauth_broker": {
+      "providers": ["github", "google"],
+      "platform_client_id_model": "single_gateway_client_per_provider",
+      "flow": "oauth2.1_authorization_code_pkce",
+      "state_ttl_seconds": 300,
+      "session_token_ttl_seconds": 3600,
+      "state_binding_fields": ["namespace", "provider", "nonce_sha256", "code_verifier_sha256", "redirect_path"],
+      "provider_token_exposure": "broker_vault_only_by_default"
+    },
+    "authkit": {
+      "agent_token_ttl_seconds": 900,
+      "proof_methods": ["dpop+jwt", "mtls"],
+      "grants": ["client_credentials", "urn:ietf:params:oauth:grant-type:token-exchange"],
+      "required_claims": ["iss", "aud", "sub", "agent_id", "owner_id", "scope", "cnf", "iat", "exp", "jti"]
+    }
+  },
+  "sync": {
+    "protocols": ["sse", "websocket"],
+    "source_of_truth": "mutation_log",
+    "delivery_scope": "{namespace, primitive}",
+    "resume": {
+      "sse": "Last-Event-ID",
+      "websocket": "after_sequence"
+    },
+    "user_publish_api": false,
+    "event_schema": "#/$defs/SyncEvent"
+  },
+  "data_boundaries": [
+    {
+      "name": "compiler_boundary",
+      "trust_level": "untrusted_source_to_policy_checked_bundle",
+      "controls": ["import_policy", "no_disk_write", "sri_dependency_graph", "source_hash"]
+    },
+    {
+      "name": "runtime_boundary",
+      "trust_level": "untrusted_code_in_sandbox",
+      "controls": ["isolate_heap_limit", "cpu_deadline", "frozen_globals", "capability_tokens"]
+    },
+    {
+      "name": "data_plane_boundary",
+      "trust_level": "namespace_scoped_host_binding",
+      "controls": ["capability_audience", "namespace_authorizer", "prepared_statements_only", "mutation_log_append"]
+    },
+    {
+      "name": "auth_boundary",
+      "trust_level": "brokered_identity",
+      "controls": ["pkce", "single_use_state", "nonce", "provider_subject_hash", "audience_bound_session"]
+    },
+    {
+      "name": "sync_boundary",
+      "trust_level": "committed_events_only",
+      "controls": ["namespace_subscription_acl", "primitive_filter", "sequence_resume", "connection_limit"]
+    }
+  ],
+  "failure_mitigations": [
+    {
+      "failure": "cross_tenant_data_access",
+      "mitigation": "Every primitive operation requires a signed capability token with namespace, primitive, operation, audience, and expiry claims."
+    },
+    {
+      "failure": "v8_cold_start_latency",
+      "mitigation": "Base snapshots, bytecode cache keyed by bundle hash, pre-activation warming, and active namespace idle pools."
+    },
+    {
+      "failure": "oauth_state_or_token_collision",
+      "mitigation": "OAuth state records are namespace-bound, nonce-bound, PKCE-bound, single-use, and expire after five minutes; session tokens are audience-bound to namespace."
+    },
+    {
+      "failure": "bundle_cache_poisoning",
+      "mitigation": "Build keys include source hash, dependency lock hash, runtime version, policy version, and module format."
+    },
+    {
+      "failure": "sync_event_leakage",
+      "mitigation": "Sync groups are keyed by namespace and primitive, and events are emitted only by data-plane mutation log commits."
+    }
+  ],
+  "$defs": {
+    "CreateAppRequest": {
+      "type": "object",
+      "required": ["name", "entrypoint", "source"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "entrypoint": { "type": "string" },
+        "source": { "type": "string" },
+        "runtime": { "enum": ["v8-isolate", "wasm-worker"] }
+      },
+      "additionalProperties": false
+    },
+    "CreateAppResponse": {
+      "type": "object",
+      "required": ["app_id", "namespace", "deployment"],
+      "properties": {
+        "app_id": { "type": "string" },
+        "namespace": { "type": "string" },
+        "deployment": { "$ref": "#/$defs/Deployment" }
+      }
+    },
+    "CreateDeploymentRequest": {
+      "type": "object",
+      "required": ["entrypoint", "source"],
+      "properties": {
+        "entrypoint": { "type": "string" },
+        "source": { "type": "string" },
+        "runtime": { "enum": ["v8-isolate", "wasm-worker"] }
+      },
+      "additionalProperties": false
+    },
+    "Deployment": {
+      "type": "object",
+      "required": ["deployment_id", "build_id", "bundle_sha256", "runtime", "status"],
+      "properties": {
+        "deployment_id": { "type": "string" },
+        "build_id": { "type": "string" },
+        "bundle_sha256": { "type": "string" },
+        "runtime": { "enum": ["v8-isolate", "wasm-worker"] },
+        "status": { "enum": ["compiled", "activating", "active", "failed"] }
+      }
+    },
+    "CompileRequest": {
+      "type": "object",
+      "required": ["request_id", "app_id", "namespace", "entrypoint", "source", "runtime", "import_policy"],
+      "properties": {
+        "request_id": { "type": "string" },
+        "app_id": { "type": "string" },
+        "namespace": { "type": "string" },
+        "entrypoint": { "type": "string" },
+        "source": { "type": "string" },
+        "runtime": { "enum": ["v8-isolate", "wasm-worker"] },
+        "language_hint": { "enum": ["ts", "tsx", "js", "jsx"] },
+        "import_policy": { "$ref": "#/$defs/ImportPolicy" }
+      }
+    },
+    "CompileResult": {
+      "type": "object",
+      "required": ["build_id", "module_format", "bundle_sha256", "source_sha256", "detected_primitives"],
+      "properties": {
+        "build_id": { "type": "string" },
+        "module_format": { "const": "esm" },
+        "bundle_sha256": { "type": "string" },
+        "source_sha256": { "type": "string" },
+        "dependency_lock_sha256": { "type": "string" },
+        "detected_primitives": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PrimitiveRef" }
+        }
+      }
+    },
+    "ImportPolicy": {
+      "type": "object",
+      "required": ["allowed_builtins", "deny_native_modules"],
+      "properties": {
+        "allowed_builtins": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "deny_native_modules": { "type": "boolean" },
+        "max_dependency_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "PrimitiveRef": {
+      "type": "object",
+      "required": ["kind", "name"],
+      "properties": {
+        "kind": { "enum": ["db", "storage", "sync", "auth"] },
+        "name": { "type": "string" }
+      }
+    },
+    "InvocationEnvelope": {
+      "type": "object",
+      "required": ["invocation_id", "app_id", "namespace", "build_id", "method", "url", "headers", "deadline_unix_ms"],
+      "properties": {
+        "invocation_id": { "type": "string" },
+        "app_id": { "type": "string" },
+        "namespace": { "type": "string" },
+        "build_id": { "type": "string" },
+        "method": { "type": "string" },
+        "url": { "type": "string" },
+        "headers": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": { "type": "string" }
+          }
+        },
+        "body_stream_id": { "type": "string" },
+        "client_ip_hash": { "type": "string" },
+        "deadline_unix_ms": { "type": "integer" }
+      }
+    },
+    "InvocationResponse": {
+      "type": "object",
+      "required": ["status", "headers"],
+      "properties": {
+        "status": { "type": "integer" },
+        "headers": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": { "type": "string" }
+          }
+        },
+        "body_stream_id": { "type": "string" }
+      }
+    },
+    "SyncEvent": {
+      "type": "object",
+      "required": ["event_id", "namespace", "primitive", "key", "operation", "version", "sequence", "occurred_at"],
+      "properties": {
+        "event_id": { "type": "string" },
+        "namespace": { "type": "string" },
+        "primitive": { "type": "string" },
+        "key": { "type": "string" },
+        "operation": { "enum": ["put", "patch", "delete", "storage.put", "storage.delete"] },
+        "version": { "type": "string" },
+        "sequence": { "type": "integer" },
+        "payload": true,
+        "occurred_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "SyncSubscribeFrame": {
+      "type": "object",
+      "required": ["type", "primitive"],
+      "properties": {
+        "type": { "const": "subscribe" },
+        "primitive": { "type": "string" },
+        "after_sequence": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "SyncEventFrame": {
+      "type": "object",
+      "required": ["type", "event"],
+      "properties": {
+        "type": { "const": "event" },
+        "event": { "$ref": "#/$defs/SyncEvent" }
+      }
+    },
+    "OmdDocument": {
+      "type": "object",
+      "required": ["omd_version", "platform", "api_base", "authkit", "capabilities"],
+      "properties": {
+        "omd_version": { "type": "string" },
+        "platform": { "const": "mudrock" },
+        "api_base": { "type": "string", "format": "uri" },
+        "authkit": { "type": "object" },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "AgentRegistrationRequest": {
+      "type": "object",
+      "required": ["agent_name", "jwks_uri", "requested_scopes"],
+      "properties": {
+        "agent_name": { "type": "string" },
+        "jwks_uri": { "type": "string", "format": "uri" },
+        "requested_scopes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "AgentRegistrationResponse": {
+      "type": "object",
+      "required": ["agent_id", "client_id", "token_endpoint", "approved_scopes"],
+      "properties": {
+        "agent_id": { "type": "string" },
+        "client_id": { "type": "string" },
+        "token_endpoint": { "type": "string", "format": "uri" },
+        "approved_scopes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
