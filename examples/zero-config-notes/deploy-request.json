@@ -1,0 +1,6 @@
+{
+  "name": "zero-config-notes",
+  "entrypoint": "index.js",
+  "source_file": "examples/zero-config-notes/index.js",
+  "runtime": "v8-isolate"
+}

@@ -211,7 +211,8 @@ Fanout:
 - `sync-router` tails namespace logs.
 - Active connections are grouped by `{namespace, primitive}`.
 - Events are multicast only after durable commit.
-- Clients resume with `Last-Event-ID` for SSE or `after_sequence` for WebSocket.
+- SSE events carry `id: <event_id>`, `event: mutation`, and JSON `data`; clients resume with `Last-Event-ID`.
+- WebSocket clients resume with `after_sequence`.
 
 ## OAuth Broker
 
@@ -330,6 +331,13 @@ type AgentTokenClaims = {
 };
 ```
 
+Local development profile:
+
+- `POST /oauth/token` accepts the `client_credentials` grant for a registered `client_id`.
+- Requested scopes must be a subset of the registration's approved scopes.
+- Local tokens are structured development tokens with the same core claims as production agent tokens and a `cnf.method` value of `local-development`.
+- Local gateway instances can enforce `apps:create`, `apps:deploy`, and `logs:read` scopes on control-plane routes; production still requires DPoP or mTLS proof verification.
+
 Machine deployment:
 
 ```text
@@ -349,4 +357,3 @@ The API verifies proof-of-possession before creating namespaces. Agent accounts 
 - All sync delivery is derived from committed mutations.
 - OAuth state is single-use and expires in five minutes.
 - Agent tokens require proof-of-possession and expire in fifteen minutes by default.
-

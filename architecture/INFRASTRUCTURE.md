@@ -115,6 +115,13 @@ Invocation flow:
 8. Response streams back through the gateway.
 9. Worker is returned to pool or destroyed based on taint/lifetime policy.
 
+Local executable profile:
+
+- The local prototype imports compiled bundles from memory-resident `data:` URLs salted by namespace and deployment id.
+- Local platform and CLI invocations execute app code in a worker thread against a base data-plane snapshot, then merge non-conflicting worker deltas into the latest local state and append the completion log in one state update only after host response limits pass.
+- The worker installs an async-context Mudrock proxy for the current invocation's frozen host binding without reusing another app's namespace.
+- Local wall-clock enforcement terminates the invocation worker, so synchronous loops cannot pin the gateway or CLI process. Production isolate pooling, taint handling, and bytecode caching remain runtime-manager responsibilities.
+
 Invocation envelope:
 
 ```ts
@@ -214,4 +221,3 @@ Known failure classes addressed:
 - V8 cold starts: bounded with bytecode cache, base snapshots, and pre-activation warming.
 - OAuth token collision: prevented by namespaced state records, nonce uniqueness, PKCE verifier binding, and provider subject mapping.
 - Bundle cache poisoning: prevented by source hash, dependency lock hash, runtime version, and policy version in the build key.
-

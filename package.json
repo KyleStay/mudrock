@@ -1,0 +1,28 @@
+{
+  "name": "mudrock",
+  "version": "0.1.0",
+  "description": "Zero-configuration runtime prototype for small networked applications.",
+  "type": "module",
+  "bin": {
+    "mudrock": "./bin/mudrock.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./compiler": "./src/compiler/memory-compiler.js",
+    "./control-plane": "./src/control-plane/local-store.js",
+    "./gateway": "./src/gateway/index.js",
+    "./gateway/local-platform": "./src/gateway/local-platform.js",
+    "./omd": "./src/omd/manifest.js",
+    "./runtime": "./src/runtime/index.mjs",
+    "./shared": "./src/shared/index.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "verify": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
