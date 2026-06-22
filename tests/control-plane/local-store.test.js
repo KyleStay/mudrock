@@ -642,6 +642,54 @@ test("LocalProjectStore merged data-plane transactions preserve independent stal
   assert.deepEqual(state.logs.slice(-2).map((row) => row.event).sort(), ["first", "second"]);
 });
 
+test("LocalProjectStore merged data-plane transactions preserve sequence continuity when a stale base is retried", async () => {
+  const { statePath } = await tempStatePath();
+  const store = new LocalProjectStore({ statePath, ownerId: "owner_test" });
+  const deployed = await store.deploy({
+    name: "notes",
+    entrypoint: "index.js",
+    source: "export default { fetch(){ return new Response('ok') } }"
+  });
+
+  let releaseSeed;
+  const seedCanCommit = new Promise((resolve) => {
+    releaseSeed = resolve;
+  });
+  const seeded = store.withMergedDataPlaneForApp("notes", async ({ app, dataPlane }) => {
+    dataPlane.putRecord(app.namespace, "notes", "note:seed", { title: "seed" });
+    await seedCanCommit;
+    return {
+      dataPlane,
+      logs: [{ event: "seed" }],
+      value: { label: "seed" }
+    };
+  });
+
+  const second = store.withMergedDataPlaneForApp("notes", async ({ app, dataPlane }) => {
+    dataPlane.putRecord(app.namespace, "notes", "note:next", { title: "next" });
+    return {
+      dataPlane,
+      logs: [{ event: "next" }],
+      value: { label: "second" }
+    };
+  });
+  releaseSeed();
+  const [seededResult, secondResult] = await Promise.all([seeded, second]);
+  assert.deepEqual(seededResult.label, "seed");
+  assert.equal(Array.isArray(seededResult.durableEvents), true);
+  assert.equal(Array.isArray(secondResult.durableEvents), true);
+  assert.equal(secondResult.durableEvents.at(-1).sequence, seededResult.durableEvents.at(-1).sequence + 1);
+  assert.equal(seededResult.durableEvents.at(-1).key, "note:seed");
+  assert.equal(secondResult.durableEvents.at(-1).key, "note:next");
+  assert.equal(seededResult.durableEvents.at(-1).event_id, `${deployed.namespace}:${seededResult.durableEvents.at(-1).sequence}`);
+  assert.equal(secondResult.durableEvents.at(-1).event_id, `${deployed.namespace}:${secondResult.durableEvents.at(-1).sequence}`);
+  assert.deepEqual(secondResult.label, "second");
+
+  const dataPlane = await store.dataPlaneForApp("notes");
+  assert.deepEqual(dataPlane.getRecord(deployed.namespace, "notes", "note:seed"), { title: "seed" });
+  assert.deepEqual(dataPlane.getRecord(deployed.namespace, "notes", "note:next"), { title: "next" });
+});
+
 test("LocalProjectStore merged data-plane transactions do not persist rolled-back writes", async () => {
   const { statePath } = await tempStatePath();
   const store = new LocalProjectStore({ statePath, ownerId: "owner_test" });
