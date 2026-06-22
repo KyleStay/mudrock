@@ -765,6 +765,9 @@ async function removeStaleLock(lockPath) {
   try {
     const details = await stat(lockPath);
     const owner = await readLockOwner(lockPath);
+    if (owner !== undefined && isValidPid(owner.pid) && isPidAlive(owner.pid)) {
+      return false;
+    }
     if (owner !== undefined && !isPidAlive(owner.pid)) {
       return removeLockIfUnchanged(lockPath, owner?.token, details.mtimeMs);
     }

@@ -209,30 +209,31 @@ test("LocalProjectStore reclaims stale locks before continuing", async () => {
   );
 });
 
-test("LocalProjectStore reclaims stale locks based on acquired_at metadata", async () => {
+test("LocalProjectStore reclaims stale locks based on acquired_at metadata when owner is not running", async () => {
   const { stateDir, statePath } = await tempStatePath();
   const staleLock = join(stateDir, ".state.json.lock");
   const store = new LocalProjectStore({ statePath, ownerId: "owner_test" });
   const staleAcquiredAt = new Date(Date.now() - (5 * 60_000 + 60_000));
 
-  await withLiveOwnerProcess(async (owner) => {
-    await rm(staleLock, { recursive: true, force: true });
-    await mkdir(staleLock, { recursive: true });
-    await writeFile(join(staleLock, "owner.json"), JSON.stringify({
-      pid: owner.pid,
-      acquired_at: staleAcquiredAt.toISOString()
-    }));
-    await utimes(staleLock, new Date(), new Date());
+  const deadOwner = spawn(process.execPath, ["-e", "process.exit(0)"]);
+  await new Promise((resolve) => deadOwner.once("exit", resolve));
 
-    await store.appendLog({ event: "acquired-at-reclaimed" });
+  await rm(staleLock, { recursive: true, force: true });
+  await mkdir(staleLock, { recursive: true });
+  await writeFile(join(staleLock, "owner.json"), JSON.stringify({
+    pid: deadOwner.pid,
+    acquired_at: staleAcquiredAt.toISOString()
+  }));
+  await utimes(staleLock, new Date(), new Date());
 
-    const state = await store.read();
-    assert.deepEqual(state.logs.map((row) => row.event), ["acquired-at-reclaimed"]);
-    await assert.rejects(
-      async () => readFile(join(staleLock, "owner.json"), "utf8"),
-      /ENOENT/
-    );
-  });
+  await store.appendLog({ event: "acquired-at-reclaimed" });
+
+  const state = await store.read();
+  assert.deepEqual(state.logs.map((row) => row.event), ["acquired-at-reclaimed"]);
+  await assert.rejects(
+    async () => readFile(join(staleLock, "owner.json"), "utf8"),
+    /ENOENT/
+  );
 });
 
 test("LocalProjectStore falls back to mtime when acquired_at metadata is malformed", async () => {
@@ -241,24 +242,25 @@ test("LocalProjectStore falls back to mtime when acquired_at metadata is malform
   const store = new LocalProjectStore({ statePath, ownerId: "owner_test" });
   const staleMtime = new Date(Date.now() - (5 * 60_000 + 60_000));
 
-  await withLiveOwnerProcess(async (owner) => {
-    await rm(staleLock, { recursive: true, force: true });
-    await mkdir(staleLock, { recursive: true });
-    await writeFile(join(staleLock, "owner.json"), JSON.stringify({
-      pid: owner.pid,
-      acquired_at: "not-a-real-timestamp"
-    }));
-    await utimes(staleLock, staleMtime, staleMtime);
+  const deadOwner = spawn(process.execPath, ["-e", "process.exit(0)"]);
+  await new Promise((resolve) => deadOwner.once("exit", resolve));
 
-    await store.appendLog({ event: "fallback-age-reclaimed" });
+  await rm(staleLock, { recursive: true, force: true });
+  await mkdir(staleLock, { recursive: true });
+  await writeFile(join(staleLock, "owner.json"), JSON.stringify({
+    pid: deadOwner.pid,
+    acquired_at: "not-a-real-timestamp"
+  }));
+  await utimes(staleLock, staleMtime, staleMtime);
 
-    const state = await store.read();
-    assert.deepEqual(state.logs.map((row) => row.event), ["fallback-age-reclaimed"]);
-    await assert.rejects(
-      async () => readFile(join(staleLock, "owner.json"), "utf8"),
-      /ENOENT/
-    );
-  });
+  await store.appendLog({ event: "fallback-age-reclaimed" });
+
+  const state = await store.read();
+  assert.deepEqual(state.logs.map((row) => row.event), ["fallback-age-reclaimed"]);
+  await assert.rejects(
+    async () => readFile(join(staleLock, "owner.json"), "utf8"),
+    /ENOENT/
+  );
 });
 
 test("LocalProjectStore falls back to mtime when owner metadata file is missing", async () => {
@@ -288,24 +290,25 @@ test("LocalProjectStore falls back to mtime when acquired_at metadata is in the 
   const staleMtime = new Date(Date.now() - (5 * 60_000 + 60_000));
   const futureAcquiredAt = new Date(Date.now() + 60_000);
 
-  await withLiveOwnerProcess(async (owner) => {
-    await rm(staleLock, { recursive: true, force: true });
-    await mkdir(staleLock, { recursive: true });
-    await writeFile(join(staleLock, "owner.json"), JSON.stringify({
-      pid: owner.pid,
-      acquired_at: futureAcquiredAt.toISOString()
-    }));
-    await utimes(staleLock, staleMtime, staleMtime);
+  const deadOwner = spawn(process.execPath, ["-e", "process.exit(0)"]);
+  await new Promise((resolve) => deadOwner.once("exit", resolve));
 
-    await store.appendLog({ event: "future-acquired-at-fallback" });
+  await rm(staleLock, { recursive: true, force: true });
+  await mkdir(staleLock, { recursive: true });
+  await writeFile(join(staleLock, "owner.json"), JSON.stringify({
+    pid: deadOwner.pid,
+    acquired_at: futureAcquiredAt.toISOString()
+  }));
+  await utimes(staleLock, staleMtime, staleMtime);
 
-    const state = await store.read();
-    assert.deepEqual(state.logs.map((row) => row.event), ["future-acquired-at-fallback"]);
-    await assert.rejects(
-      async () => readFile(join(staleLock, "owner.json"), "utf8"),
-      /ENOENT/
-    );
-  });
+  await store.appendLog({ event: "future-acquired-at-fallback" });
+
+  const state = await store.read();
+  assert.deepEqual(state.logs.map((row) => row.event), ["future-acquired-at-fallback"]);
+  await assert.rejects(
+    async () => readFile(join(staleLock, "owner.json"), "utf8"),
+    /ENOENT/
+  );
 });
 
 test("LocalProjectStore reclaims stale locks when owner metadata is malformed", async () => {
@@ -375,6 +378,130 @@ test("LocalProjectStore waits for live lock before mutating state", async () => 
     const state = await store.read();
     assert.equal(state.logs.at(-1).event, "blocked");
   });
+});
+
+test("LocalProjectStore waits for live lock when acquired_at is old but process is still running", async () => {
+  const { stateDir, statePath } = await tempStatePath();
+  const lockPath = join(stateDir, ".state.json.lock");
+  const store = new LocalProjectStore({ statePath, ownerId: "owner_test" });
+
+  await withLiveOwnerProcess(async (owner) => {
+    await rm(lockPath, { recursive: true, force: true });
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(join(lockPath, "owner.json"), JSON.stringify({
+      pid: owner.pid,
+      acquired_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+      token: "manual-test-token"
+    }));
+
+    let resolved = false;
+    const append = store.appendLog({ event: "blocked-by-live-pid" }).then(() => {
+      resolved = true;
+    });
+
+    const blocked = await waitFor(() => resolved, { timeoutMs: 80, intervalMs: 10 });
+    assert.equal(blocked, false, "appendLog should wait while owner process is still alive");
+
+    owner.kill("SIGKILL");
+    await new Promise((resolve) => owner.once("exit", resolve));
+    await append;
+    await assert.rejects(async () => readFile(join(lockPath, "owner.json"), "utf8"), /ENOENT/);
+
+    const state = await store.read();
+    assert.equal(state.logs.at(-1).event, "blocked-by-live-pid");
+  });
+});
+
+test("LocalProjectStore withDataPlaneForApp failure releases lock", async () => {
+  const { statePath } = await tempStatePath();
+  const store = new LocalProjectStore({ statePath, ownerId: "owner_test" });
+  await store.deploy({
+    name: "notes",
+    entrypoint: "index.js",
+    source: "export default { fetch(){ return new Response('ok') } }"
+  });
+
+  const failed = store.withDataPlaneForApp("notes", async () => {
+    throw new Error("boom");
+  });
+  await assert.rejects(failed, /boom/);
+
+  await store.appendLog({ event: "after-data-plane-failure" });
+  const state = await store.read();
+  assert.equal(state.logs.at(-1).event, "after-data-plane-failure");
+});
+
+test("LocalProjectStore withMergedDataPlaneForApp failure releases lock", async () => {
+  const { statePath } = await tempStatePath();
+  const store = new LocalProjectStore({ statePath, ownerId: "owner_test" });
+  await store.deploy({
+    name: "notes",
+    entrypoint: "index.js",
+    source: "export default { fetch(){ return new Response('ok') } }"
+  });
+
+  const failed = store.withMergedDataPlaneForApp("notes", async () => {
+    throw new Error("boom");
+  });
+  await assert.rejects(failed, /boom/);
+
+  await store.appendLog({ event: "after-merged-failure" });
+  const state = await store.read();
+  assert.equal(state.logs.at(-1).event, "after-merged-failure");
+});
+
+test("LocalProjectStore returns durable events and snapshot from merged transaction value", async () => {
+  const { statePath } = await tempStatePath();
+  const store = new LocalProjectStore({ statePath, ownerId: "owner_test" });
+  const deployed = await store.deploy({
+    name: "notes",
+    entrypoint: "index.js",
+    source: "export default { fetch(){ return new Response('ok') } }"
+  });
+
+  const result = await store.withMergedDataPlaneForApp("notes", async ({ app, dataPlane }) => {
+    dataPlane.putRecord(deployed.namespace, "notes", "note:1", { title: "contract" });
+    return {
+      value: { ok: true },
+      dataPlane,
+      logs: [{ event: "contract" }]
+    };
+  });
+
+  assert.deepEqual(result?.ok, true);
+  assert.ok(Array.isArray(result?.durableEvents));
+  assert.equal(result.durableEvents.at(-1).key, "note:1");
+  assert.equal(result.durableEvents.at(-1).sequence, 1);
+  assert.equal(result.durableEvents.at(-1).namespace, deployed.namespace);
+
+  const snapshot = result.dataPlaneSnapshot;
+  const persisted = snapshot.namespaces[deployed.namespace];
+  assert.ok(Array.isArray(persisted?.kv));
+  assert.equal(persisted.kv.at(-1).key, "note:1");
+
+  const state = await store.read();
+  assert.equal(state.logs.at(-1).event, "contract");
+});
+
+test("LocalProjectStore supports merged transactions with logs-only return", async () => {
+  const { statePath } = await tempStatePath();
+  const store = new LocalProjectStore({ statePath, ownerId: "owner_test" });
+  await store.deploy({
+    name: "notes",
+    entrypoint: "index.js",
+    source: "export default { fetch(){ return new Response('ok') } }"
+  });
+
+  const result = await store.withMergedDataPlaneForApp("notes", async () => {
+    return { logs: [{ event: "merged-logs-only" }] };
+  });
+
+  assert.equal(result, undefined);
+
+  const state = await store.read();
+  assert.equal(state.logs.at(-1).event, "merged-logs-only");
+  const dataPlane = await store.dataPlaneForApp("notes");
+  assert.equal(Object.keys(dataPlane.snapshot().namespaces).length, 0);
 });
 
 test("LocalProjectStore preserves concurrent deploy and appendLog writes", async () => {
@@ -669,10 +796,25 @@ function createRuntimeForTest(namespace, dataPlane) {
 
 async function withLiveOwnerProcess(fn) {
   const owner = spawn(process.execPath, ["-e", "setTimeout(() => {}, 50000)"]);
+  let exited = false;
+  owner.once("exit", () => {
+    exited = true;
+  });
   try {
     return await fn(owner);
   } finally {
-    owner.kill();
-    await new Promise((resolve) => owner.once("exit", resolve));
+    owner.kill("SIGKILL");
+    if (!exited) {
+      await new Promise((resolve) => owner.once("exit", resolve));
+    }
   }
+}
+
+async function waitFor(condition, { timeoutMs = 500, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await condition()) return true;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
 }
