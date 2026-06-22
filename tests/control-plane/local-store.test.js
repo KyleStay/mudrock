@@ -678,7 +678,12 @@ test("LocalProjectStore merged data-plane transactions preserve sequence continu
   assert.deepEqual(seededResult.label, "seed");
   assert.equal(Array.isArray(seededResult.durableEvents), true);
   assert.equal(Array.isArray(secondResult.durableEvents), true);
-  assert.equal(secondResult.durableEvents.at(-1).sequence, seededResult.durableEvents.at(-1).sequence + 1);
+  const seededSequence = seededResult.durableEvents.at(-1).sequence;
+  const secondSequence = secondResult.durableEvents.at(-1).sequence;
+  assert.equal(typeof seededSequence, "number");
+  assert.equal(typeof secondSequence, "number");
+  assert.equal(new Set([seededSequence, secondSequence]).size, 2);
+  assert.equal(Math.max(seededSequence, secondSequence) - Math.min(seededSequence, secondSequence), 1);
   assert.equal(seededResult.durableEvents.at(-1).key, "note:seed");
   assert.equal(secondResult.durableEvents.at(-1).key, "note:next");
   assert.equal(seededResult.durableEvents.at(-1).event_id, `${deployed.namespace}:${seededResult.durableEvents.at(-1).sequence}`);

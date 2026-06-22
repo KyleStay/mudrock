@@ -14,6 +14,7 @@ export async function invokeLocalBundleInWorker({
   request,
   timeoutMs,
 }) {
+  const normalizedTimeoutMs = normalizeTimeoutMs(timeoutMs);
   const resourceLimits = workerResourceLimits(limits);
   const worker = new Worker(new URL("./invocation-worker.mjs", import.meta.url), {
     ...(resourceLimits === undefined ? {} : { resourceLimits }),
@@ -61,21 +62,25 @@ export async function invokeLocalBundleInWorker({
         }
       });
 
-      if (timeoutMs !== undefined && timeoutMs !== null) {
-        if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
-          settle(reject, new TypeError("Invocation timeout must be a positive integer."));
-          return;
-        }
+      if (normalizedTimeoutMs !== undefined && normalizedTimeoutMs !== null) {
         timeout = setTimeout(() => {
           didTimeout = true;
           worker.terminate()
-            .finally(() => settle(reject, new LocalInvocationTimeoutError(timeoutMs)));
-        }, timeoutMs);
+            .finally(() => settle(reject, new LocalInvocationTimeoutError(normalizedTimeoutMs)));
+        }, normalizedTimeoutMs);
       }
     });
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function normalizeTimeoutMs(timeoutMs) {
+  if (timeoutMs === undefined || timeoutMs === null) return timeoutMs;
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError("Invocation timeout must be a positive integer.");
+  }
+  return timeoutMs;
 }
 
 function workerResourceLimits(limits = {}) {
