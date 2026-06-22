@@ -78,13 +78,90 @@ test("local platform composes gateway, control plane, runtime, and sync", async 
     method: "GET",
     path: `/a/${created.namespace}/__mudrock/auth/start?provider=github&redirect_path=/notes`
   });
-  assert.deepEqual(JSON.parse(auth.body), {
+  assert.equal(auth.statusCode, 302);
+  const authBody = JSON.parse(auth.body);
+  assert.match(auth.headers.location, /^https:\/\/local\.test\/auth\/callback\/github\?code=local-development-code&state=oauth_/u);
+  assert.deepEqual({
+    provider: authBody.provider,
+    namespace: authBody.namespace,
+    redirect_path: authBody.redirect_path,
+    status: authBody.status
+  }, {
     provider: "github",
     namespace: created.namespace,
     redirect_path: "/notes",
-    status: "local-auth-started",
-    message: "Local Mudrock auth broker accepted the sign-in request."
+    status: "local-auth-redirect"
   });
+});
+
+test("local platform issues namespace-scoped app sessions through OAuth callback", async () => {
+  const platform = createLocalPlatform({
+    statePath: await tempStatePath(),
+    ownerId: "owner_123",
+    apiBase: "https://local.test",
+    authBase: "https://auth.test",
+    gatewayBaseUrl: "https://local.test",
+  });
+
+  const createApp = await platform.handle({
+    method: "POST",
+    path: "/v1/apps",
+    body: JSON.stringify({
+      name: "session",
+      entrypoint: "index.js",
+      source: `
+        export default {
+          async fetch() {
+            const user = await Mudrock.auth.require();
+            return Response.json(user);
+          }
+        };
+      `
+    })
+  });
+  const created = JSON.parse(createApp.body);
+
+  const start = await platform.handle({
+    method: "GET",
+    path: `/a/${created.namespace}/__mudrock/auth/start?provider=github&redirect_path=/session`
+  });
+  const callbackUrl = new URL(start.headers.location);
+  assert.equal(callbackUrl.origin, "https://auth.test");
+
+  const callback = await platform.handle({
+    method: "GET",
+    path: `${callbackUrl.pathname}${callbackUrl.search}`
+  });
+  assert.equal(callback.statusCode, 302);
+  assert.equal(callback.headers.location, "/session");
+  assert.match(callback.headers["set-cookie"], /^mudrock_session=mrs_/u);
+  const session = JSON.parse(callback.body);
+  assert.match(session.access_token, /^mrs_/u);
+  assert.equal(session.namespace, created.namespace);
+  assert.equal(session.user.provider, "github");
+
+  const invocation = await platform.handle({
+    method: "GET",
+    path: `/a/${created.namespace}/session`,
+    headers: { authorization: `Bearer ${session.access_token}` }
+  });
+  assert.equal(invocation.statusCode, 200);
+  assert.deepEqual(JSON.parse(invocation.body), session.user);
+
+  const replay = await platform.handle({
+    method: "GET",
+    path: `${callbackUrl.pathname}${callbackUrl.search}`
+  });
+  assert.equal(replay.statusCode, 400);
+  assert.match(replay.body, /already been consumed/u);
+
+  const invalidToken = await platform.handle({
+    method: "GET",
+    path: `/a/${created.namespace}/session`,
+    headers: { authorization: "Bearer mrs_invalid" }
+  });
+  assert.equal(invalidToken.statusCode, 401);
+  assert.match(invalidToken.body, /Invalid app session token/u);
 });
 
 test("local platform serves persisted storage objects through gateway URLs", async () => {

@@ -1,8 +1,11 @@
 import { Buffer } from "node:buffer";
-import { parentPort, workerData } from "node:worker_threads";
+import { workerData } from "node:worker_threads";
 
 import { LocalDataPlane, createLocalRuntime } from "./index.mjs";
 import { importLocalBundle, runWithMudrockRuntime } from "./local-invocation.js";
+
+const resultPort = workerData.result_port;
+delete workerData.result_port;
 
 try {
   sanitizeAppGlobals();
@@ -26,7 +29,7 @@ try {
   );
   const bytes = new Uint8Array(await response.arrayBuffer());
 
-  parentPort.postMessage({
+  resultPort.postMessage({
     ok: true,
     response: {
       status: response.status,
@@ -37,7 +40,7 @@ try {
     data_plane_snapshot: dataPlane.snapshot(),
   });
 } catch (error) {
-  parentPort.postMessage({
+  resultPort.postMessage({
     ok: false,
     error: {
       name: error?.name,
@@ -46,6 +49,8 @@ try {
       stack: error?.stack,
     },
   });
+} finally {
+  resultPort.close();
 }
 
 function materializeRequest(request) {

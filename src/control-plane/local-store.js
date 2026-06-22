@@ -10,6 +10,8 @@ import { createNamespace, hashBytes, stableJson } from "../shared/index.js";
 
 const STATE_VERSION = 1;
 const LOCAL_AGENT_TOKEN_TTL_SECONDS = 900;
+const LOCAL_OAUTH_STATE_TTL_SECONDS = 600;
+const LOCAL_APP_SESSION_TTL_SECONDS = 3600;
 const STATE_LOCK_STALE_MS = 5 * 60_000;
 const STATE_LOCK_RETRY_MS = 10;
 
@@ -413,6 +415,135 @@ export class LocalProjectStore {
 
     return claims;
   }
+
+  async startOAuthFlow(namespace, { provider = "github", redirect_path = "/" } = {}, { authBase } = {}) {
+    const normalizedProvider = requireOAuthProvider(provider);
+    const normalizedRedirectPath = requireRedirectPath(redirect_path);
+    const stateId = `oauth_${randomUUID()}`;
+    const nowMs = Date.now();
+    const expiresAtMs = nowMs + LOCAL_OAUTH_STATE_TTL_SECONDS * 1000;
+
+    await this.#update((state) => {
+      const app = appByNamespace(state, namespace);
+      state.oauthStates ??= {};
+      state.oauthStates[stateId] = {
+        state_id: stateId,
+        provider: normalizedProvider,
+        namespace,
+        app_id: app.app_id,
+        redirect_path: normalizedRedirectPath,
+        nonce_sha256: hashBytes(`nonce:${stateId}`),
+        code_verifier_sha256: hashBytes(`verifier:${stateId}`),
+        created_at_unix_ms: nowMs,
+        expires_at_unix_ms: expiresAtMs
+      };
+      state.logs.push({
+        at: new Date(nowMs).toISOString(),
+        namespace,
+        app_id: app.app_id,
+        event: "oauth.state_created",
+        provider: normalizedProvider,
+        state_id: stateId,
+        expires_at: new Date(expiresAtMs).toISOString()
+      });
+    });
+
+    const authorizationUrl = new URL(`/auth/callback/${encodeURIComponent(normalizedProvider)}`, normalizeIssuer(authBase));
+    authorizationUrl.searchParams.set("code", "local-development-code");
+    authorizationUrl.searchParams.set("state", stateId);
+
+    return {
+      provider: normalizedProvider,
+      namespace,
+      redirect_path: normalizedRedirectPath,
+      state: stateId,
+      authorization_url: authorizationUrl.toString(),
+      expires_at: new Date(expiresAtMs).toISOString()
+    };
+  }
+
+  async completeOAuthCallback(provider, { code, state } = {}, { issuer } = {}) {
+    const normalizedProvider = requireOAuthProvider(provider);
+    const authorizationCode = String(code || "").trim();
+    if (!authorizationCode) {
+      throw new TypeError("OAuth callback requires code");
+    }
+    const stateId = String(state || "").trim();
+    if (!stateId) {
+      throw new TypeError("OAuth callback requires state");
+    }
+
+    const issuedAt = Math.floor(Date.now() / 1000);
+    let session;
+    await this.#update((latestState) => {
+      const record = latestState.oauthStates?.[stateId];
+      if (!record) {
+        throw new TypeError("Unknown OAuth state");
+      }
+      if (record.provider !== normalizedProvider) {
+        throw new TypeError("OAuth provider does not match state");
+      }
+      if (record.consumed_at_unix_ms !== undefined) {
+        throw new TypeError("OAuth state has already been consumed");
+      }
+      if (record.expires_at_unix_ms <= Date.now()) {
+        throw new TypeError("OAuth state has expired");
+      }
+
+      const subjectHash = hashBytes(`${normalizedProvider}:${authorizationCode}`).slice(0, 32);
+      const claims = {
+        iss: normalizeIssuer(issuer),
+        aud: record.namespace,
+        sub: `user_${subjectHash.slice(0, 24)}`,
+        provider: normalizedProvider,
+        provider_subject_hash: subjectHash,
+        namespace: record.namespace,
+        scope: ["app:session"],
+        iat: issuedAt,
+        exp: issuedAt + LOCAL_APP_SESSION_TTL_SECONDS,
+        jti: `jti_${randomUUID()}`
+      };
+
+      record.consumed_at_unix_ms = Date.now();
+      session = {
+        access_token: encodeLocalAppSessionToken(claims),
+        token_type: "Bearer",
+        expires_in: LOCAL_APP_SESSION_TTL_SECONDS,
+        redirect_path: record.redirect_path,
+        namespace: record.namespace,
+        user: appSessionUser(claims)
+      };
+      latestState.logs.push({
+        at: new Date(issuedAt * 1000).toISOString(),
+        namespace: record.namespace,
+        app_id: record.app_id,
+        event: "oauth.session_issued",
+        provider: normalizedProvider,
+        state_id: stateId,
+        subject: claims.sub,
+        expires_at: new Date(claims.exp * 1000).toISOString()
+      });
+    });
+
+    return session;
+  }
+
+  async verifyAppSessionToken(accessToken, { namespace } = {}) {
+    const claims = decodeLocalAppSessionToken(accessToken);
+    if (claims.exp <= Math.floor(Date.now() / 1000)) {
+      throw new TypeError("App session token has expired");
+    }
+    if (namespace !== undefined && claims.namespace !== namespace) {
+      throw new TypeError("App session token namespace mismatch");
+    }
+    if (claims.aud !== claims.namespace) {
+      throw new TypeError("App session token audience mismatch");
+    }
+    return {
+      claims,
+      user: appSessionUser(claims)
+    };
+  }
 }
 
 export class LocalStateConflictError extends Error {
@@ -434,6 +565,7 @@ function emptyState(ownerId) {
     appNames: {},
     apps: {},
     agents: {},
+    oauthStates: {},
     logs: []
   };
 }
@@ -452,6 +584,7 @@ function normalizeState(value, ownerId, statePath) {
     appNames: normalizePlainRecord(value.appNames, "appNames", statePath),
     apps: normalizePlainRecord(value.apps, "apps", statePath),
     agents: normalizePlainRecord(value.agents, "agents", statePath),
+    oauthStates: normalizePlainRecord(value.oauthStates, "oauthStates", statePath),
     logs: normalizeArray(value.logs, "logs", statePath)
   };
 }
@@ -688,6 +821,30 @@ function normalizeIssuer(issuer) {
   return url.toString().replace(/\/$/u, "");
 }
 
+function appByNamespace(state, namespace) {
+  const app = Object.values(state.apps).find((candidate) => candidate.namespace === namespace);
+  if (!app) {
+    throw new Error(`Unknown Mudrock namespace: ${namespace}`);
+  }
+  return app;
+}
+
+function requireOAuthProvider(provider) {
+  const normalized = String(provider || "").trim().toLowerCase();
+  if (!["github", "google"].includes(normalized)) {
+    throw new TypeError("OAuth provider must be github or google");
+  }
+  return normalized;
+}
+
+function requireRedirectPath(redirectPath) {
+  const normalized = String(redirectPath || "/").trim();
+  if (!normalized.startsWith("/") || normalized.startsWith("//")) {
+    throw new TypeError("OAuth redirect_path must be an app-relative path");
+  }
+  return normalized;
+}
+
 function encodeLocalToken(claims) {
   const payload = base64UrlEncode(JSON.stringify(claims));
   const signature = hashBytes(`local-authkit:${payload}`);
@@ -722,6 +879,51 @@ function decodeLocalToken(token) {
     throw new TypeError("AuthKit access token scope must be an array");
   }
   return claims;
+}
+
+function encodeLocalAppSessionToken(claims) {
+  const payload = base64UrlEncode(JSON.stringify(claims));
+  const signature = hashBytes(`local-app-session:${payload}`);
+  return `mrs_${payload}.${signature}`;
+}
+
+function decodeLocalAppSessionToken(token) {
+  const value = String(token || "");
+  const match = /^mrs_([A-Za-z0-9_-]+)\.([a-f0-9]{64})$/u.exec(value);
+  if (!match) {
+    throw new TypeError("Invalid app session token");
+  }
+
+  const [, payload, signature] = match;
+  if (signature !== hashBytes(`local-app-session:${payload}`)) {
+    throw new TypeError("Invalid app session token signature");
+  }
+
+  let claims;
+  try {
+    claims = JSON.parse(Buffer.from(base64UrlDecode(payload)).toString("utf8"));
+  } catch (error) {
+    throw new TypeError("Invalid app session token payload", { cause: error });
+  }
+
+  for (const field of ["iss", "aud", "sub", "provider", "provider_subject_hash", "namespace", "scope", "iat", "exp", "jti"]) {
+    if (!(field in claims)) {
+      throw new TypeError(`App session token is missing ${field}`);
+    }
+  }
+  if (!Array.isArray(claims.scope)) {
+    throw new TypeError("App session token scope must be an array");
+  }
+  return claims;
+}
+
+function appSessionUser(claims) {
+  return {
+    id: claims.sub,
+    provider: claims.provider,
+    provider_subject_hash: claims.provider_subject_hash,
+    namespace: claims.namespace
+  };
 }
 
 function base64UrlEncode(value) {

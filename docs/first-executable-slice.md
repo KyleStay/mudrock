@@ -88,9 +88,11 @@ The test harness is not a production runtime. It is a small executable contract 
 - sync events are emitted only from committed database and storage mutations.
 - sync SSE responses include stable event ids and can resume from `Last-Event-ID`.
 - worker-isolated wall-clock timeouts reject local invocations before saving data-plane snapshots, including synchronous CPU loops.
+- worker invocation results travel over a private host-owned message port, so app code cannot forge successful worker responses through `parentPort`.
 - runtime limits reject oversized database values and storage request bodies before committing mutations.
 - runtime host response limits reject oversized app responses before saving local data-plane snapshots.
 - database transactions stage writes, commit mutation-log events together, and leave no partial state on failure.
+- local OAuth start creates a durable namespace-bound state record, `/auth/callback/{provider}` consumes it once, and verified app session tokens populate `Mudrock.auth.currentUser()`.
 
 ## Platform Limits and Errors
 
@@ -109,7 +111,7 @@ The local default wall-clock limit is intentionally conservative at 1000 ms for 
 
 Gateway request validation rejects invalid deployment requests before control-plane callbacks run. Unknown infrastructure fields such as `bucket`, `database`, and `oauth_client` are rejected instead of silently ignored, keeping the zero-config contract explicit.
 
-Agent registration uses the same strict gateway boundary: `agent_name`, `jwks_uri`, and `requested_scopes` are the only accepted fields, the JWKS URI must be absolute HTTP(S), and successful local registrations store deterministic agent/client identifiers for OMD/AuthKit development flows. The local token endpoint supports `client_credentials` requests for registered `client_id` values, rejects unapproved scopes, returns `access_token`, `token_type`, `expires_in`, and `scope`, and can enforce `apps:create`, `apps:deploy`, and `logs:read` on control-plane routes when authenticated mode is enabled.
+Agent registration uses the same strict gateway boundary: `agent_name`, `jwks_uri`, and `requested_scopes` are the only accepted fields, the JWKS URI must be absolute HTTP(S), and successful local registrations store deterministic agent/client identifiers for OMD/AuthKit development flows. The local token endpoint supports `client_credentials` requests for registered `client_id` values, rejects unapproved scopes, returns `access_token`, `token_type`, `expires_in`, and `scope`, and can enforce `apps:create`, `apps:deploy`, and `logs:read` on control-plane routes when authenticated mode is enabled. The local app-session flow keeps provider exchange offline for the prototype while preserving the important broker semantics: state is durable, callback consumption is one-time, tokens are namespace-bound, and app code receives only the brokered user shape.
 
 ## Expected Platform Behavior
 

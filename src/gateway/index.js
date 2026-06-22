@@ -133,6 +133,28 @@ export class LocalGateway {
       }
     }
 
+    const oauthCallbackMatch = matchOAuthCallbackPath(request.pathname);
+    if (oauthCallbackMatch) {
+      requireMethod(request, "GET");
+      try {
+        return normalizeCallbackResponse(await callRequired(
+          this.callbacks.authCallback,
+          oauthCallbackMatch.provider,
+          {
+            code: request.url.searchParams.get("code"),
+            state: request.url.searchParams.get("state")
+          },
+          requestContext(request)
+        ));
+      } catch (error) {
+        if (error instanceof GatewayError) throw error;
+        if (error instanceof TypeError) {
+          throw new GatewayError(error.message, { statusCode: 400 });
+        }
+        throw error;
+      }
+    }
+
     const logsMatch = matchLogsPath(request.pathname);
     if (logsMatch) {
       requireMethod(request, "GET");
@@ -555,6 +577,12 @@ function matchLogsPath(pathname) {
   const match = /^\/v1\/apps\/([^/]+)\/logs$/u.exec(pathname);
   if (!match) return null;
   return { appId: decodeURIComponent(match[1]) };
+}
+
+function matchOAuthCallbackPath(pathname) {
+  const match = /^\/auth\/callback\/([^/]+)$/u.exec(pathname);
+  if (!match) return null;
+  return { provider: decodeURIComponent(match[1]) };
 }
 
 function matchAppRoute(pathname) {

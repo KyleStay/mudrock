@@ -83,12 +83,29 @@ export function createLocalPlatform({
         return controlPlane.verifyAgentToken(accessToken, options);
       },
       async authStart(namespace, { provider, redirect_path }) {
+        const flow = await controlPlane.startOAuthFlow(namespace, { provider, redirect_path }, { authBase });
         return {
-          provider,
-          namespace,
-          redirect_path,
-          status: "local-auth-started",
-          message: "Local Mudrock auth broker accepted the sign-in request."
+          statusCode: 302,
+          headers: {
+            location: flow.authorization_url,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            ...flow,
+            status: "local-auth-redirect"
+          })
+        };
+      },
+      async authCallback(provider, query) {
+        const session = await controlPlane.completeOAuthCallback(provider, query, { issuer: authBase });
+        return {
+          statusCode: 302,
+          headers: {
+            location: session.redirect_path,
+            "content-type": "application/json",
+            "set-cookie": localSessionCookie(session.access_token, session.expires_in)
+          },
+          body: JSON.stringify(session)
         };
       },
       async storageObject(namespace, { primitive, key }) {
@@ -176,6 +193,7 @@ function createSerialQueue() {
 
 async function invokeLocalBundle({ authContext, controlPlane, envelope, gatewayBaseUrl, syncHub }) {
   try {
+    const effectiveAuthContext = await resolveInvocationAuthContext({ authContext, controlPlane, envelope });
     const committed = await controlPlane.withMergedDataPlaneForNamespace(envelope.namespace, async ({
       app,
       dataPlane,
@@ -189,7 +207,7 @@ async function invokeLocalBundle({ authContext, controlPlane, envelope, gatewayB
         body: envelope.body,
       });
       const result = await invokeLocalBundleInWorker({
-        authContext,
+        authContext: effectiveAuthContext,
         buildId: deployment.build_id,
         bundleText: deployment.bundle_text,
         dataPlaneSnapshot: baseSnapshot,
@@ -240,6 +258,35 @@ async function invokeLocalBundle({ authContext, controlPlane, envelope, gatewayB
     }
     throw error;
   }
+}
+
+async function resolveInvocationAuthContext({ authContext, controlPlane, envelope }) {
+  if (authContext !== undefined) return authContext;
+  const token = bearerToken(Object.fromEntries(envelope.headers ?? []).authorization);
+  if (!token) return undefined;
+  try {
+    return await controlPlane.verifyAppSessionToken(token, { namespace: envelope.namespace });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new GatewayError(error.message, { statusCode: 401 });
+    }
+    throw error;
+  }
+}
+
+function bearerToken(value) {
+  const match = /^Bearer\s+(.+)$/iu.exec(String(value || "").trim());
+  return match?.[1];
+}
+
+function localSessionCookie(accessToken, expiresIn) {
+  return [
+    `mudrock_session=${accessToken}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${expiresIn}`
+  ].join("; ");
 }
 
 function runtimeLimitsForDeployment(deployment) {

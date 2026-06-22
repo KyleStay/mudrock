@@ -106,6 +106,7 @@ This repository now contains a first executable slice:
 - Local gateway discovery advertises executable live sync support (`sync.sse`); WebSocket upgrade requests fail explicitly until that transport lands.
 - OMD agent registration through the advertised `/v1/agents/register` endpoint, backed by deterministic local client metadata.
 - A local AuthKit `/oauth/token` endpoint for `client_credentials` tokens, with registered-client lookup, approved-scope checks, documented token claims, and opt-in control-plane scope enforcement.
+- A local OAuth broker loop that creates durable namespace-bound state records, consumes `/auth/callback/{provider}` once, issues app session tokens, and passes verified session users into `Mudrock.auth`.
 - A standard-library-only CLI for deploy, invoke, logs, and OMD discovery/claim workflows.
 - A local `serve` command that exposes the composed gateway/control-plane/runtime platform as an HTTP server.
 - A zero-config notes example and integration harness covering database, storage, auth shape, sync events, and namespace derivation.
