@@ -735,16 +735,23 @@ function base64UrlDecode(value) {
 async function acquireStateLock(statePath) {
   const stateDir = dirname(statePath);
   const lockPath = join(stateDir, `.${basename(statePath)}.lock`);
+  const lockToken = randomUUID();
 
   await mkdir(stateDir, { recursive: true });
 
   while (true) {
     try {
       await mkdir(lockPath);
-      await writeFile(join(lockPath, "owner.json"), JSON.stringify({
-        pid: process.pid,
-        acquired_at: new Date().toISOString()
-      }));
+      try {
+        await writeFile(join(lockPath, "owner.json"), JSON.stringify({
+          pid: process.pid,
+          acquired_at: new Date().toISOString(),
+          token: lockToken
+        }));
+      } catch (error) {
+        await rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
       return () => rm(lockPath, { recursive: true, force: true });
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
@@ -757,11 +764,73 @@ async function acquireStateLock(statePath) {
 async function removeStaleLock(lockPath) {
   try {
     const details = await stat(lockPath);
-    if (Date.now() - details.mtimeMs < STATE_LOCK_STALE_MS) return false;
+    const owner = await readLockOwner(lockPath);
+    if (owner !== undefined && isValidPid(owner.pid) && isPidAlive(owner.pid)) {
+      return false;
+    }
+    if (owner !== undefined && !isPidAlive(owner.pid)) {
+      return removeLockIfUnchanged(lockPath, owner?.token, details.mtimeMs);
+    }
+    const lockAgeMs = getLockAgeMs(owner, details.mtimeMs);
+    if (lockAgeMs < STATE_LOCK_STALE_MS) return false;
+    return removeLockIfUnchanged(lockPath, owner?.token, details.mtimeMs);
+  } catch (error) {
+    if (error.code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+async function removeLockIfUnchanged(lockPath, expectedToken, observedMtimeMs) {
+  try {
+    const details = await stat(lockPath);
+    const owner = await readLockOwner(lockPath);
+    if (owner?.token !== expectedToken) return false;
+    if (expectedToken === undefined && details.mtimeMs !== observedMtimeMs) return false;
     await rm(lockPath, { recursive: true, force: true });
     return true;
   } catch (error) {
     if (error.code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+function getLockAgeMs(owner, fallbackMtimeMs) {
+  const nowMs = Date.now();
+  if (owner?.acquired_at) {
+    const acquiredAtMs = Date.parse(owner.acquired_at);
+    if (Number.isFinite(acquiredAtMs) && acquiredAtMs <= nowMs) {
+      return nowMs - acquiredAtMs;
+    }
+  }
+  const mtimeAgeMs = nowMs - fallbackMtimeMs;
+  return mtimeAgeMs < 0 ? 0 : mtimeAgeMs;
+}
+
+function isPidAlive(pid) {
+  const normalizedPid = Number(pid);
+  if (!isValidPid(normalizedPid)) return false;
+  try {
+    process.kill(normalizedPid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    return true;
+  }
+}
+
+function isValidPid(pid) {
+  const normalizedPid = Number(pid);
+  return Number.isInteger(normalizedPid) && normalizedPid > 0;
+}
+
+async function readLockOwner(lockPath) {
+  try {
+    const ownerPath = join(lockPath, "owner.json");
+    const raw = await readFile(ownerPath, "utf8");
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error.code === "ENOENT") return undefined;
+    if (error instanceof SyntaxError) return undefined;
     throw error;
   }
 }
