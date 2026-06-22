@@ -757,11 +757,51 @@ async function acquireStateLock(statePath) {
 async function removeStaleLock(lockPath) {
   try {
     const details = await stat(lockPath);
-    if (Date.now() - details.mtimeMs < STATE_LOCK_STALE_MS) return false;
+    const owner = await readLockOwner(lockPath);
+    if (owner !== undefined && !isPidAlive(owner.pid)) {
+      await rm(lockPath, { recursive: true, force: true });
+      return true;
+    }
+    const lockAgeMs = getLockAgeMs(owner, details.mtimeMs);
+    if (lockAgeMs < STATE_LOCK_STALE_MS) return false;
     await rm(lockPath, { recursive: true, force: true });
     return true;
   } catch (error) {
     if (error.code === "ENOENT") return true;
     throw error;
+  }
+}
+
+function getLockAgeMs(owner, fallbackMtimeMs) {
+  const nowMs = Date.now();
+  if (owner?.acquired_at) {
+    const acquiredAtMs = Date.parse(owner.acquired_at);
+    if (Number.isFinite(acquiredAtMs) && acquiredAtMs <= nowMs) {
+      return nowMs - acquiredAtMs;
+    }
+  }
+  const mtimeAgeMs = nowMs - fallbackMtimeMs;
+  return mtimeAgeMs < 0 ? 0 : mtimeAgeMs;
+}
+
+function isPidAlive(pid) {
+  const normalizedPid = Number(pid);
+  if (!Number.isInteger(normalizedPid) || normalizedPid <= 0) return false;
+  try {
+    process.kill(normalizedPid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    return true;
+  }
+}
+
+async function readLockOwner(lockPath) {
+  try {
+    const ownerPath = join(lockPath, "owner.json");
+    const raw = await readFile(ownerPath, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
   }
 }
