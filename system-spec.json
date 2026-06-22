@@ -190,6 +190,20 @@
         "content_type": "application/json",
         "schema_ref": "#/$defs/AgentRegistrationResponse"
       }
+    },
+    {
+      "id": "authkit_token",
+      "method": "POST",
+      "path": "/oauth/token",
+      "auth": ["registered_agent_client"],
+      "request_body": {
+        "content_type": "application/x-www-form-urlencoded",
+        "schema_ref": "#/$defs/AgentTokenRequest"
+      },
+      "response_body": {
+        "content_type": "application/json",
+        "schema_ref": "#/$defs/AgentTokenResponse"
+      }
     }
   ],
   "internal_protocols": [
@@ -415,8 +429,21 @@
         "build_id": { "type": "string" },
         "bundle_sha256": { "type": "string" },
         "runtime": { "enum": ["v8-isolate", "wasm-worker"] },
+        "runtime_limits": { "$ref": "#/$defs/RuntimeLimits" },
         "status": { "enum": ["compiled", "activating", "active", "failed"] }
       }
+    },
+    "RuntimeLimits": {
+      "type": "object",
+      "properties": {
+        "max_cpu_ms_per_request": { "type": "integer", "minimum": 1 },
+        "max_wall_ms_per_request": { "type": "integer", "minimum": 1 },
+        "max_heap_bytes": { "type": "integer", "minimum": 1 },
+        "max_request_body_bytes": { "type": "integer", "minimum": 1 },
+        "max_response_body_bytes": { "type": "integer", "minimum": 1 },
+        "max_open_sync_connections": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
     },
     "CompileRequest": {
       "type": "object",
@@ -564,7 +591,8 @@
           "type": "array",
           "items": { "type": "string" }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "AgentRegistrationResponse": {
       "type": "object",
@@ -577,6 +605,26 @@
           "type": "array",
           "items": { "type": "string" }
         }
+      }
+    },
+    "AgentTokenRequest": {
+      "type": "object",
+      "required": ["grant_type", "client_id"],
+      "properties": {
+        "grant_type": { "const": "client_credentials" },
+        "client_id": { "type": "string" },
+        "scope": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "AgentTokenResponse": {
+      "type": "object",
+      "required": ["access_token", "token_type", "expires_in", "scope"],
+      "properties": {
+        "access_token": { "type": "string" },
+        "token_type": { "const": "Bearer" },
+        "expires_in": { "type": "integer", "minimum": 1 },
+        "scope": { "type": "string" }
       }
     }
   }
