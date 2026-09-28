@@ -1,4 +1,4 @@
-import { Worker } from "node:worker_threads";
+import { MessageChannel, Worker } from "node:worker_threads";
 
 import { LocalInvocationTimeoutError } from "./local-invocation.js";
 
@@ -16,6 +16,7 @@ export async function invokeLocalBundleInWorker({
 }) {
   const normalizedTimeoutMs = normalizeTimeoutMs(timeoutMs);
   const resourceLimits = workerResourceLimits(limits);
+  const { port1: resultPort, port2: workerResultPort } = new MessageChannel();
   const worker = new Worker(new URL("./invocation-worker.mjs", import.meta.url), {
     ...(resourceLimits === undefined ? {} : { resourceLimits }),
     workerData: {
@@ -27,8 +28,10 @@ export async function invokeLocalBundleInWorker({
       gateway_base_url: gatewayBaseUrl,
       limits,
       namespace,
+      result_port: workerResultPort,
       request: await serializeRequest(request),
     },
+    transferList: [workerResultPort],
   });
 
   let timeout;
@@ -40,9 +43,10 @@ export async function invokeLocalBundleInWorker({
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        resultPort.close();
         fn(value);
       };
-      worker.once("message", (message) => {
+      resultPort.once("message", (message) => {
         if (settled) return;
         if (message.ok) {
           settle(resolve, {
